@@ -1,49 +1,109 @@
 import React, { useState, useEffect } from 'react'
+import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Header from './components/Header'
 import StateSelector from './components/StateSelector'
 import RightsCards from './components/RightsCards'
 import EncounterAssistant from './components/EncounterAssistant'
+import EncounterAssistantEnhanced from './components/EncounterAssistantEnhanced'
 import DocumentationPanel from './components/DocumentationPanel'
 import SubscriptionModal from './components/SubscriptionModal'
+import AuthModal from './components/AuthModal'
 import { stateRightsData } from './data/stateRights'
+import { allStatesRightsData } from './data/allStatesRights'
+import { geolocationService } from './lib/geolocation'
+import { encounterService } from './lib/supabase'
+import { paymentService } from './lib/stripe'
+import { v4 as uuidv4 } from 'uuid'
 
-export default function App() {
+function AppContent() {
+  const { user, loading, subscriptionStatus, updateSubscriptionStatus } = useAuth()
   const [selectedState, setSelectedState] = useState('')
   const [activeTab, setActiveTab] = useState('rights')
   const [isRecording, setIsRecording] = useState(false)
   const [encounterLogs, setEncounterLogs] = useState([])
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false)
-  const [subscriptionStatus, setSubscriptionStatus] = useState('free')
+  const [showAuthModal, setShowAuthModal] = useState(false)
   const [currentEncounter, setCurrentEncounter] = useState(null)
+  const [stateData, setStateData] = useState(null)
+  const [isLoadingLocation, setIsLoadingLocation] = useState(false)
 
   useEffect(() => {
-    // Try to get user's location
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          // In a real app, we'd use reverse geocoding to get the state
-          // For demo purposes, we'll default to California
-          setSelectedState('california')
-        },
-        (error) => {
-          console.log('Location access denied')
+    // Auto-detect user's location and state
+    const detectLocation = async () => {
+      setIsLoadingLocation(true)
+      try {
+        const stateResult = await geolocationService.getCurrentState()
+        if (stateResult.success) {
+          setSelectedState(stateResult.state)
+        } else {
+          // Fallback to manual selection
+          console.log('Location detection failed:', stateResult.error)
         }
-      )
+      } catch (error) {
+        console.log('Location access denied:', error)
+      } finally {
+        setIsLoadingLocation(false)
+      }
     }
+
+    detectLocation()
   }, [])
 
-  const handleStartEncounter = () => {
+  useEffect(() => {
+    // Load state data when state is selected
+    if (selectedState) {
+      const data = allStatesRightsData[selectedState] || stateRightsData[selectedState]
+      setStateData(data)
+    }
+  }, [selectedState])
+
+  useEffect(() => {
+    // Load user's encounter logs
+    const loadEncounterLogs = async () => {
+      if (user) {
+        try {
+          const { data, error } = await encounterService.getUserEncounterLogs(user.id)
+          if (!error && data) {
+            setEncounterLogs(data)
+          }
+        } catch (error) {
+          console.error('Error loading encounter logs:', error)
+        }
+      }
+    }
+
+    loadEncounterLogs()
+  }, [user])
+
+  const handleStartEncounter = async () => {
+    if (!user) {
+      setShowAuthModal(true)
+      return
+    }
+
     const newEncounter = {
-      id: Date.now(),
+      id: uuidv4(),
+      user_id: user.id,
       timestamp: new Date().toISOString(),
       state: selectedState,
       location: '',
       notes: '',
-      audioRecordingUrl: null,
-      videoRecordingUrl: null
+      audio_recording_url: null,
+      video_recording_url: null
     }
-    setCurrentEncounter(newEncounter)
-    setActiveTab('encounter')
+
+    try {
+      const { data, error } = await encounterService.createEncounterLog(newEncounter)
+      if (!error && data) {
+        setCurrentEncounter(data[0])
+        setActiveTab('encounter')
+      }
+    } catch (error) {
+      console.error('Error creating encounter:', error)
+      // Fallback to local state
+      setCurrentEncounter(newEncounter)
+      setActiveTab('encounter')
+    }
   }
 
   const handleRecordingStart = () => {
@@ -54,22 +114,53 @@ export default function App() {
     setIsRecording(true)
   }
 
-  const handleRecordingStop = () => {
+  const handleRecordingStop = async () => {
     setIsRecording(false)
     if (currentEncounter) {
-      // In a real app, we'd upload the recording
-      const updatedEncounter = {
-        ...currentEncounter,
-        audioRecordingUrl: 'demo-recording-url'
+      try {
+        // Update encounter logs
+        const updatedLogs = await encounterService.getUserEncounterLogs(user?.id)
+        if (updatedLogs.data) {
+          setEncounterLogs(updatedLogs.data)
+        }
+      } catch (error) {
+        console.error('Error updating encounter logs:', error)
       }
-      setEncounterLogs(prev => [...prev, updatedEncounter])
-      setCurrentEncounter(null)
     }
   }
 
-  const handleSubscribe = () => {
-    setSubscriptionStatus('premium')
-    setShowSubscriptionModal(false)
+  const handleSubscribe = async () => {
+    if (!user) {
+      setShowAuthModal(true)
+      return
+    }
+
+    try {
+      const result = await paymentService.createCheckoutSession('price_premium_monthly', user.id)
+      if (result.success) {
+        if (result.demo) {
+          // Demo mode - simulate successful subscription
+          await updateSubscriptionStatus('premium')
+          setShowSubscriptionModal(false)
+          alert('Demo: Subscription activated! 🎉')
+        }
+        // In production, Stripe would redirect to checkout
+      }
+    } catch (error) {
+      console.error('Subscription error:', error)
+      alert('Subscription failed. Please try again.')
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-white/30 border-t-white rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-white/70">Loading Roadside Rights...</p>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -78,17 +169,22 @@ export default function App() {
         <Header 
           subscriptionStatus={subscriptionStatus}
           onSubscriptionClick={() => setShowSubscriptionModal(true)}
+          user={user}
+          onShowAuth={() => setShowAuthModal(true)}
         />
         
         <main className="container mx-auto px-4 py-6 max-w-4xl">
           {!selectedState ? (
-            <StateSelector onStateSelect={setSelectedState} />
+            <StateSelector 
+              onStateSelect={setSelectedState} 
+              isLoading={isLoadingLocation}
+            />
           ) : (
             <>
               <div className="mb-6">
                 <div className="bg-surface/10 backdrop-blur-sm rounded-lg p-4 mb-4">
                   <h2 className="text-xl font-semibold text-white mb-2">
-                    Current State: {stateRightsData[selectedState]?.name}
+                    Current State: {stateData?.name || selectedState}
                   </h2>
                   <button
                     onClick={() => setSelectedState('')}
@@ -128,29 +224,45 @@ export default function App() {
                 </div>
               </div>
 
-              {activeTab === 'rights' && (
+              {activeTab === 'rights' && stateData && (
                 <RightsCards 
-                  stateData={stateRightsData[selectedState]}
+                  stateData={stateData}
                   subscriptionStatus={subscriptionStatus}
                 />
               )}
 
               {activeTab === 'encounter' && (
-                <EncounterAssistant
-                  stateData={stateRightsData[selectedState]}
-                  currentEncounter={currentEncounter}
-                  setCurrentEncounter={setCurrentEncounter}
-                  isRecording={isRecording}
-                  onRecordingStart={handleRecordingStart}
-                  onRecordingStop={handleRecordingStop}
-                  subscriptionStatus={subscriptionStatus}
-                />
+                <>
+                  {subscriptionStatus === 'premium' ? (
+                    <EncounterAssistantEnhanced
+                      stateData={stateData}
+                      currentEncounter={currentEncounter}
+                      setCurrentEncounter={setCurrentEncounter}
+                      isRecording={isRecording}
+                      onRecordingStart={handleRecordingStart}
+                      onRecordingStop={handleRecordingStop}
+                      subscriptionStatus={subscriptionStatus}
+                      user={user}
+                    />
+                  ) : (
+                    <EncounterAssistant
+                      stateData={stateData}
+                      currentEncounter={currentEncounter}
+                      setCurrentEncounter={setCurrentEncounter}
+                      isRecording={isRecording}
+                      onRecordingStart={handleRecordingStart}
+                      onRecordingStop={handleRecordingStop}
+                      subscriptionStatus={subscriptionStatus}
+                    />
+                  )}
+                </>
               )}
 
               {activeTab === 'logs' && (
                 <DocumentationPanel
                   encounterLogs={encounterLogs}
-                  stateData={stateRightsData[selectedState]}
+                  stateData={stateData}
+                  user={user}
                 />
               )}
             </>
@@ -163,7 +275,20 @@ export default function App() {
             onSubscribe={handleSubscribe}
           />
         )}
+
+        <AuthModal
+          isOpen={showAuthModal}
+          onClose={() => setShowAuthModal(false)}
+        />
       </div>
     </div>
+  )
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   )
 }
